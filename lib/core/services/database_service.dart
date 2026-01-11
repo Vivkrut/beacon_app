@@ -48,7 +48,7 @@ class DatabaseService {
 
     return openDatabase(
       dbPath,
-      version: 2,
+      version: 4,
       onCreate: (db, version) async {
         print('[DatabaseService] onCreate called with version: $version');
         try {
@@ -59,9 +59,13 @@ class DatabaseService {
               timestamp TEXT NOT NULL,
               gpsCoordinates TEXT,
               contactsNotified TEXT NOT NULL,
+              contactsPhones TEXT,
+              sentPhones TEXT,
+              failedPhones TEXT,
               status TEXT NOT NULL,
               videoPath TEXT,
               audioPath TEXT,
+              evidencePath TEXT,
               note TEXT,
               createdAt TEXT NOT NULL
             )
@@ -101,9 +105,13 @@ class DatabaseService {
               timestamp TEXT NOT NULL,
               gpsCoordinates TEXT,
               contactsNotified TEXT NOT NULL,
+              contactsPhones TEXT,
+              sentPhones TEXT,
+              failedPhones TEXT,
               status TEXT NOT NULL,
               videoPath TEXT,
               audioPath TEXT,
+              evidencePath TEXT,
               note TEXT,
               createdAt TEXT NOT NULL
             )
@@ -145,15 +153,45 @@ class DatabaseService {
                 timestamp TEXT NOT NULL,
                 gpsCoordinates TEXT,
                 contactsNotified TEXT NOT NULL,
+                contactsPhones TEXT,
                 status TEXT NOT NULL,
                 videoPath TEXT,
                 audioPath TEXT,
+                evidencePath TEXT,
                 note TEXT,
                 createdAt TEXT NOT NULL
               )
             ''');
           } else {
             print('[DatabaseService] sos_events table verified to exist');
+            // Ensure new columns exist (best-effort, avoid duplicate warnings)
+            final columns = await db.rawQuery(
+              "PRAGMA table_info('sos_events')",
+            );
+            final columnNames = columns
+                .map((row) => (row['name'] as String).toLowerCase())
+                .toSet();
+
+            if (!columnNames.contains('evidencepath')) {
+              await db.execute(
+                'ALTER TABLE sos_events ADD COLUMN evidencePath TEXT',
+              );
+            }
+            if (!columnNames.contains('contactsphones')) {
+              await db.execute(
+                'ALTER TABLE sos_events ADD COLUMN contactsPhones TEXT',
+              );
+            }
+            if (!columnNames.contains('sentphones')) {
+              await db.execute(
+                'ALTER TABLE sos_events ADD COLUMN sentPhones TEXT',
+              );
+            }
+            if (!columnNames.contains('failedphones')) {
+              await db.execute(
+                'ALTER TABLE sos_events ADD COLUMN failedPhones TEXT',
+              );
+            }
           }
 
           if (contactsResult.isEmpty) {

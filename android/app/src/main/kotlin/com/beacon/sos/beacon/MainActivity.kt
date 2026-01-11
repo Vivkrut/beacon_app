@@ -8,10 +8,12 @@ import android.content.IntentFilter
 import android.content.Context
 import android.content.BroadcastReceiver
 import android.os.Build
+import android.provider.Telephony
 
 class MainActivity : FlutterActivity() {
     private val CHANNEL = "com.beacon/shake_service"
     private val SHAKE_EVENTS_CHANNEL = "com.beacon/shake_events"
+    private val SMS_ROLE_CHANNEL = "com.beacon/sms_role"
     private var shakeReceiver: BroadcastReceiver? = null
     private lateinit var shakeEventsChannel: MethodChannel
 
@@ -35,6 +37,29 @@ class MainActivity : FlutterActivity() {
                         val sensitivity = call.argument<Int>("sensitivity") ?: 3
                         setShakeSensitivity(sensitivity)
                         result.success(null)
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, SMS_ROLE_CHANNEL)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "isDefaultSmsApp" -> {
+                        val isDefault = Telephony.Sms.getDefaultSmsPackage(this) == packageName
+                        result.success(isDefault)
+                    }
+                    "requestDefaultSmsApp" -> {
+                        try {
+                            val intent = Intent(Telephony.Sms.Intents.ACTION_CHANGE_DEFAULT).apply {
+                                putExtra(Telephony.Sms.Intents.EXTRA_PACKAGE_NAME, packageName)
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                            startActivity(intent)
+                            result.success(null)
+                        } catch (e: Exception) {
+                            result.error("sms_default", "Failed to request default SMS: ${e.message}", null)
+                        }
                     }
                     else -> result.notImplemented()
                 }

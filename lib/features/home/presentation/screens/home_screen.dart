@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:uuid/uuid.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:geolocator/geolocator.dart';
@@ -9,9 +10,11 @@ import 'dart:async';
 import 'package:beacon/core/models/sos_event.dart';
 import 'package:beacon/core/models/contact.dart';
 import 'package:beacon/features/blackbox/presentation/notifiers/blackbox_notifier.dart';
+import 'package:beacon/features/blackbox/services/video_evidence_service.dart';
 import 'package:beacon/features/settings/presentation/screens/settings_screen.dart';
 import 'package:beacon/features/contacts/data/contact_repository.dart';
 import 'package:beacon/features/sos_manager/domain/sos_manager.dart';
+import 'package:beacon/core/services/sms_role_service.dart';
 import 'package:beacon/features/sos_manager/presentation/screens/pre_sos_screen.dart';
 import 'package:beacon/features/sos_manager/presentation/screens/post_sos_screen.dart';
 import 'package:beacon/features/home/presentation/widgets/sos_status_bar.dart';
@@ -19,6 +22,7 @@ import 'package:beacon/features/communication/services/sms_service.dart';
 import 'package:beacon/core/services/permission_service.dart';
 import 'package:beacon/core/constants/app_constants.dart';
 import 'package:vibration/vibration.dart';
+import 'package:flutter_phone_direct_caller/flutter_phone_direct_caller.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -45,10 +49,13 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _isProcessing = false;
   bool _sosTriggered = false;
   String _shakeSensitivity = AppConstants.defaultShakeSensitivity;
+  String _userName = '';
   late Timer _statusUpdateTimer;
   final SOSManager _sosManager = SOSManager();
   final ContactRepository _contactRepository = ContactRepository();
   final SMSService _smsService = SMSService();
+  TwilioService? _twilioService;
+  final VideoEvidenceService _videoEvidenceService = VideoEvidenceService();
   _ShakeConfig? _cachedShakeConfig;
 
   @override
@@ -56,6 +63,8 @@ class _HomeScreenState extends State<HomeScreen> {
     super.initState();
     _setupShakeListener();
     _loadPreferences();
+    _twilioService = _buildTwilioService();
+    _promptDefaultSmsRole();
     // Timer to update status bar every second
     _statusUpdateTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (mounted) {
@@ -74,6 +83,7 @@ class _HomeScreenState extends State<HomeScreen> {
           prefs.getString(AppConstants.prefKeyShakeSensitivity) ??
           AppConstants.defaultShakeSensitivity;
       _cachedShakeConfig = _mapSensitivity(_shakeSensitivity);
+      _userName = prefs.getString('user_name') ?? '';
     });
 
     if (_shakeDetectionEnabled) {
@@ -81,11 +91,17 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  Future<void> _promptDefaultSmsRole() async {
+    // Option 1 baseline: no default SMS requirement; do nothing.
+    return;
+  }
+
   @override
   void dispose() {
     if (_shakeDetectionEnabled) {
       _stopShakeService();
     }
+    _videoEvidenceService.dispose();
     _statusUpdateTimer.cancel();
     super.dispose();
   }
@@ -136,16 +152,6 @@ class _HomeScreenState extends State<HomeScreen> {
         } else {
           await _stopShakeService();
         }
-
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              value ? 'Shake detection enabled' : 'Shake detection disabled',
-            ),
-            backgroundColor: Colors.green,
-            duration: const Duration(seconds: 2),
-          ),
-        );
       }
     } else {
       setState(() => _isProcessing = false);
@@ -206,15 +212,66 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  /// Request location permission and get GPS coordinates
+  TwilioService? _buildTwilioService() {
+    const sid = AppConstants.twilioAccountSid;
+    const token = AppConstants.twilioAuthToken;
+    const from = AppConstants.twilioFromNumber;
+
+    final configured =
+        sid.isNotEmpty &&
+        token.isNotEmpty &&
+        from.isNotEmpty &&
+        !sid.startsWith('<') &&
+        !token.startsWith('<') &&
+        !from.startsWith('<');
+
+    if (!configured) {
+      print('[Twilio] Missing credentials; skipping Twilio wiring.');
+      return null;
+    }
+
+    print('[Twilio] Twilio configured, wiring service.');
+    return TwilioService(accountSid: sid, authToken: token, fromNumber: from);
+  }
+
+  String _formatDate(DateTime ts) => ts.toIso8601String().split('T').first;
+
+  String _formatTime(DateTime ts) =>
+      '${ts.hour.toString().padLeft(2, '0')}:${ts.minute.toString().padLeft(2, '0')}';
+
+  String _buildLocationWithLink(String gps) {
+    final regex = RegExp(r'([-0-9.]+)\D+([-0-9.]+)');
+    final match = regex.firstMatch(gps);
+    if (match != null) {
+      final lat = match.group(1);
+      final lng = match.group(2);
+      return 'https://maps.google.com/?q=$lat,$lng';
+    }
+    return gps;
+  }
+
+  String _buildAlertMessage({required SOSEvent event, bool isTest = false}) {
+    final headingName = _userName.trim().isEmpty ? '' : ' ${_userName.trim()}';
+    final heading = 'BEACON SOS ALERT$headingName${isTest ? ' [TEST]' : ''}';
+    final dateStr = _formatDate(event.timestamp);
+    final timeStr = _formatTime(event.timestamp);
+    final gps = event.gpsCoordinates ?? AppConstants.unknownLocationPlaceholder;
+    final location = _buildLocationWithLink(gps);
+
+    return '$heading\n'
+        'Date: $dateStr Time: $timeStr\n'
+        'Location: $location\n'
+        'Emergency: I need help. Please call or reach me immediately.';
+  }
+
   Future<String?> _getGPSLocation() async {
     try {
-      LocationPermission permission = await Geolocator.checkPermission();
-      if (permission == LocationPermission.denied) {
-        permission = await Geolocator.requestPermission();
-        if (!mounted) return null;
-      }
-      if (permission == LocationPermission.deniedForever) {
+      final alreadyGranted =
+          await PermissionService.isLocationPermissionGranted();
+      final hasPermission = alreadyGranted
+          ? true
+          : await PermissionService.requestLocationPermission();
+      if (!hasPermission) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
@@ -344,27 +401,49 @@ class _HomeScreenState extends State<HomeScreen> {
       print('[SOS Trigger] Recording SOS time');
       await _sosManager.recordSOSTime();
 
-      // Fetch GPS location
-      print('[SOS Trigger] Fetching GPS location');
-      final gpsLocation = await _getGPSLocation() ?? 'Unknown Location';
-      print('[SOS Trigger] GPS location: $gpsLocation');
+      // Ensure all critical permissions are granted once before parallel work
+      final permsOk = await PermissionService.requestAllPermissions();
+      if (!permsOk) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'Permissions missing: enable SMS/Camera/Mic/Location/Call',
+              ),
+              backgroundColor: Colors.red,
+            ),
+          );
+          setState(() => _sosTriggered = false);
+        }
+        return;
+      }
 
-      // Fetch primary contact
-      print('[SOS Trigger] Fetching primary contact');
+      // Fetch contacts (all) with primary prioritized
+      print('[SOS Trigger] Fetching contacts');
       final allContacts = await _contactRepository.getAllContacts();
       allContacts.sort((a, b) => (b.isPrimary ? 1 : 0) - (a.isPrimary ? 1 : 0));
       final primaryContact = allContacts.isNotEmpty ? allContacts.first : null;
-      final contactsForAlert = allContacts.take(3).toList();
+      final contactsForAlert = allContacts; // send to all saved contacts
       print('[SOS Trigger] Primary contact: ${primaryContact?.name}');
 
-      // Create SOS event with GPS location
+      // Kick off GPS lookup and evidence capture concurrently
+      print('[SOS Trigger] Fetching GPS location & starting evidence capture');
+      final gpsFuture = _getGPSLocation();
+      final evidenceFuture = _collectEvidencePath();
+
+      final gpsLocation = await gpsFuture ?? 'Unknown Location';
+      print('[SOS Trigger] GPS location: $gpsLocation');
+
+      // Create SOS event with available data (evidence path will update asynchronously)
       print('[SOS Trigger] Creating SOS event');
-      final sosEvent = SOSEvent(
+      var sosEvent = SOSEvent(
         id: const Uuid().v4(),
         timestamp: DateTime.now(),
         gpsCoordinates: gpsLocation,
         contactsNotified: contactsForAlert.map((c) => c.name).toList(),
-        status: 'triggered',
+        contactsPhones: contactsForAlert.map((c) => c.phone).toList(),
+        status: 'pending',
+        evidencePath: null,
         note: isManual ? 'MANUAL SOS' : 'SHAKE TRIGGERED SOS',
       );
       print('[SOS Trigger] SOS event created: ${sosEvent.id}');
@@ -385,11 +464,41 @@ class _HomeScreenState extends State<HomeScreen> {
         }
       }
 
-      // Send SMS alerts to contacts
-      await _sendSmsAlerts(sosEvent, contactsForAlert);
+      // Fire off SMS sending without blocking UI; update status when done
+      final smsFuture = _sendSmsAlerts(sosEvent, contactsForAlert);
+      smsFuture.then((result) async {
+        final didSend = result.sent.isNotEmpty;
+        sosEvent = sosEvent.copyWith(
+          status: didSend ? 'sent' : 'failed',
+          sentPhones: result.sent,
+          failedPhones: result.failed,
+        );
+        if (mounted) {
+          await context.read<BlackBoxNotifier>().updateEvent(sosEvent);
+        }
+      });
+
+      // Attach evidence when recording finishes
+      evidenceFuture.then((path) async {
+        if (path == null || path.isEmpty) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Evidence capture failed'),
+                backgroundColor: Colors.orange,
+              ),
+            );
+          }
+          return;
+        }
+        sosEvent = sosEvent.copyWith(evidencePath: path);
+        if (mounted) {
+          await context.read<BlackBoxNotifier>().updateEvent(sosEvent);
+        }
+      });
 
       print('[SOS Trigger] Navigating to Post-SOS screen');
-      // Show Post-SOS Screen
+      // Show Post-SOS Screen immediately while background tasks run
       if (mounted) {
         Navigator.push(
           context,
@@ -424,10 +533,15 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  Future<void> _sendSmsAlerts(SOSEvent event, List<Contact> contacts) async {
-    if (contacts.isEmpty) return;
+  Future<SMSResult> _sendSmsAlerts(
+    SOSEvent event,
+    List<Contact> contacts,
+  ) async {
+    if (contacts.isEmpty) return const SMSResult(sent: [], failed: []);
 
-    final allowed = await PermissionService.requestSmsPermission();
+    final allowed =
+        await PermissionService.isSmsPermissionGranted() ||
+        await PermissionService.requestSmsPermission();
     if (!allowed) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -437,32 +551,85 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         );
       }
-      return;
+      return const SMSResult(sent: [], failed: []);
     }
 
-    final recipients = contacts
+    final connectivity = await Connectivity().checkConnectivity();
+    final isOnline = connectivity != ConnectivityResult.none;
+    final twilioReady = isOnline && _twilioService != null;
+    print(
+      '[SMS] Connectivity=$connectivity, online=$isOnline, twilioReady=$twilioReady',
+    );
+
+    final priorityContact = contacts.firstWhere(
+      (c) => c.isPrimary,
+      orElse: () => contacts.first,
+    );
+
+    final offlineRecipients = [
+      priorityContact.phone,
+    ].where((p) => p.isNotEmpty).toList();
+    final onlineRecipients = contacts
         .map((c) => c.phone)
         .where((p) => p.isNotEmpty)
         .toList();
-    if (recipients.isEmpty) return;
+    final recipients = isOnline ? onlineRecipients : offlineRecipients;
+    if (recipients.isEmpty) return const SMSResult(sent: [], failed: []);
 
-    final body =
-        '''BEACON SOS ALERT
-Time: ${event.timestamp.toIso8601String()}
-Location: ${event.gpsCoordinates ?? 'Unknown'}
-Event ID: ${event.id}
-Status: ${event.status}''';
+    final isTest = (event.note ?? '').toUpperCase().contains('TEST');
+    final body = _buildAlertMessage(event: event, isTest: isTest);
 
     try {
-      await _smsService.sendBulk(recipients: recipients, body: body);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('SMS alerts sent to contacts'),
-            backgroundColor: Colors.green,
-          ),
+      SMSResult result;
+
+      if (twilioReady) {
+        print(
+          '[SMS] Attempting Twilio send to ${recipients.length} recipient(s)',
+        );
+        result = await _twilioService!.sendBulk(
+          recipients: recipients,
+          body: body,
+          openComposerOnFail: true,
+        );
+      } else {
+        print(
+          '[SMS] Using device SMS path (telephony + composer) for ${recipients.length} recipient(s)',
+        );
+        result = await _smsService.sendBulk(
+          recipients: recipients,
+          body: body,
+          openComposerOnFail: true,
+          composerOnly: !isOnline,
         );
       }
+
+      print(
+        '[SMS] Send result: sent=${result.sent.length}, failed=${result.failed.length}',
+      );
+
+      if (mounted) {
+        if (result.failed.isEmpty) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('SMS sent to ${result.sent.length} contact(s)'),
+              backgroundColor: Colors.green,
+            ),
+          );
+        } else {
+          final sentCount = result.sent.length;
+          final failedCount = result.failed.length;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                'Auto-SMS sent to $sentCount; composer opened for $failedCount',
+              ),
+              backgroundColor: Colors.orange,
+            ),
+          );
+        }
+      }
+
+      return result;
     } catch (e) {
       print('[SMS] Failed to send alerts: $e');
       if (mounted) {
@@ -473,6 +640,7 @@ Status: ${event.status}''';
           ),
         );
       }
+      return const SMSResult(sent: [], failed: []);
     }
   }
 
@@ -488,18 +656,27 @@ Status: ${event.status}''';
     }
 
     try {
-      final Uri phoneUri = Uri(scheme: 'tel', path: phoneNumber);
-      if (await canLaunchUrl(phoneUri)) {
-        await launchUrl(phoneUri);
-      } else {
+      final allowed = await PermissionService.requestPhonePermission();
+      if (!allowed) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-              content: Text('❌ Cannot make call'),
+              content: Text('❌ Call permission denied'),
               backgroundColor: Colors.red,
             ),
           );
         }
+        return;
+      }
+
+      final success = await FlutterPhoneDirectCaller.callNumber(phoneNumber);
+      if (success != true && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('❌ Cannot make call'),
+            backgroundColor: Colors.red,
+          ),
+        );
       }
     } catch (e) {
       if (mounted) {
@@ -510,41 +687,82 @@ Status: ${event.status}''';
     }
   }
 
+  /// Capture a short video clip for evidence; returns local file path or null.
+  Future<String?> _collectEvidencePath() async {
+    final cameraAllowed =
+        await PermissionService.isCameraPermissionGranted() ||
+        await PermissionService.requestCameraPermission();
+    final micAllowed =
+        await PermissionService.isMicrophonePermissionGranted() ||
+        await PermissionService.requestMicrophonePermission();
+
+    if (!cameraAllowed || !micAllowed) {
+      print('[Evidence] Camera/mic permission denied');
+      return null;
+    }
+
+    final path = await _videoEvidenceService.recordShortVideo(
+      duration: const Duration(seconds: 10),
+    );
+
+    if (path == null || path.isEmpty) {
+      print('[Evidence] Recording failed');
+    } else {
+      print('[Evidence] Recorded to $path');
+    }
+    return path;
+  }
+
   Future<void> _triggerTestSOS() async {
-    // Fetch all valid emergency contacts
-    final prefs = await SharedPreferences.getInstance();
-    final phone1 = prefs.getString('contact_1_phone') ?? '';
-    final phone2 = prefs.getString('contact_2_phone') ?? '';
-    final phone3 = prefs.getString('contact_3_phone') ?? '';
+    // Quick SMS-only test: reuse contact book, skip recording/cooldown.
+    final contacts = await _contactRepository.getAllContacts();
+    if (contacts.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('No contacts saved. Add contacts to test SMS.'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      }
+      return;
+    }
 
-    final contactsNotified = <String>[
-      if (phone1.isNotEmpty) phone1,
-      if (phone2.isNotEmpty) phone2,
-      if (phone3.isNotEmpty) phone3,
-    ];
+    final recipients = contacts
+        .map((c) => c.phone)
+        .where((p) => p.isNotEmpty)
+        .toList();
 
-    // Get GPS location for test
-    final gpsLocation = await _getGPSLocation() ?? '0.0, 0.0';
-
-    // Create a new SOS event with "Test SOS" marker
-    final event = SOSEvent(
+    final testEvent = SOSEvent(
       id: const Uuid().v4(),
       timestamp: DateTime.now(),
-      gpsCoordinates: gpsLocation,
-      contactsNotified: contactsNotified,
-      status: 'sent',
+      gpsCoordinates: null,
+      contactsNotified: contacts.map((c) => c.name).toList(),
+      contactsPhones: recipients,
+      status: 'pending',
+      evidencePath: null,
       note: 'TEST SOS',
     );
 
-    // Add event to BlackBox
-    if (mounted) {
-      await context.read<BlackBoxNotifier>().addEvent(event);
+    final result = await _sendSmsAlerts(testEvent, contacts);
+    final savedEvent = testEvent.copyWith(
+      status: result.sent.isNotEmpty ? 'sent' : 'failed',
+      sentPhones: result.sent,
+      failedPhones: result.failed,
+    );
 
+    if (mounted) {
+      await context.read<BlackBoxNotifier>().addEvent(savedEvent);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('🚨 Test SOS logged - GPS: $gpsLocation'),
-          backgroundColor: Colors.red,
-          duration: const Duration(seconds: 3),
+          content: Text(
+            result.sent.isNotEmpty
+                ? 'Test alert sent; composer may open if auto-send blocked.'
+                : 'Test alert failed; composer opened for manual send.',
+          ),
+          backgroundColor: result.sent.isNotEmpty
+              ? Colors.green
+              : Colors.orange,
         ),
       );
     }

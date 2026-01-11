@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_native_contact_picker/flutter_native_contact_picker.dart';
-import 'package:flutter_native_contact_picker/model/contact.dart';
+import 'package:flutter_native_contact_picker/model/contact.dart'
+    as native_contact;
 import 'package:beacon/core/constants/app_constants.dart';
 import 'package:beacon/features/blackbox/presentation/screens/blackbox_history_screen.dart';
-import 'package:beacon/features/contacts/presentation/screens/contact_list_screen.dart';
+import 'package:beacon/core/models/contact.dart';
+import 'package:beacon/features/contacts/data/contact_repository.dart';
+import 'package:uuid/uuid.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -18,11 +21,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late TextEditingController _phone1Controller;
   late TextEditingController _phone2Controller;
   late TextEditingController _phone3Controller;
-  late TextEditingController _emergencyMessageController;
   String _selectedSensitivity = 'MEDIUM';
   int _priorityContactIndex = 0;
   final _formKey = GlobalKey<FormState>();
   bool _hasUnsavedChanges = false;
+  final ContactRepository _contactRepository = ContactRepository();
+  final Uuid _uuid = const Uuid();
 
   // Store contact names from phone book
   String? _contact1Name;
@@ -36,7 +40,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
   String _originalPhone3 = '';
   String _originalSensitivity = 'MEDIUM';
   int _originalPriorityIndex = 0;
-  String _originalEmergencyMessage = '';
 
   @override
   void initState() {
@@ -45,7 +48,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _phone1Controller = TextEditingController();
     _phone2Controller = TextEditingController();
     _phone3Controller = TextEditingController();
-    _emergencyMessageController = TextEditingController();
 
     // Add listeners to detect changes
     _nameController.addListener(() {
@@ -76,13 +78,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
         });
       }
     });
-    _emergencyMessageController.addListener(() {
-      if (mounted) {
-        setState(() {
-          _hasUnsavedChanges = _checkForChanges();
-        });
-      }
-    });
 
     _loadSettings();
   }
@@ -101,9 +96,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _phone3Controller.text = _normalizePhoneNumber(
         prefs.getString('contact_3_phone') ?? '',
       );
-      _emergencyMessageController.text =
-          prefs.getString('emergency_message') ??
-          AppConstants.defaultEmergencyMessage;
       _selectedSensitivity = prefs.getString('shake_sensitivity') ?? 'MEDIUM';
       _priorityContactIndex = prefs.getInt('priority_contact_index') ?? 0;
 
@@ -112,7 +104,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _originalPhone1 = _phone1Controller.text;
       _originalPhone2 = _phone2Controller.text;
       _originalPhone3 = _phone3Controller.text;
-      _originalEmergencyMessage = _emergencyMessageController.text;
       _originalSensitivity = _selectedSensitivity;
       _originalPriorityIndex = _priorityContactIndex;
       _hasUnsavedChanges = false;
@@ -124,7 +115,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _phone1Controller.text != _originalPhone1 ||
         _phone2Controller.text != _originalPhone2 ||
         _phone3Controller.text != _originalPhone3 ||
-        _emergencyMessageController.text != _originalEmergencyMessage ||
         _selectedSensitivity != _originalSensitivity ||
         _priorityContactIndex != _originalPriorityIndex;
   }
@@ -158,7 +148,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _phone1Controller.dispose();
     _phone2Controller.dispose();
     _phone3Controller.dispose();
-    _emergencyMessageController.dispose();
     super.dispose();
   }
 
@@ -187,6 +176,34 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _isContactValid(TextEditingController controller) {
     return controller.text.isNotEmpty &&
         _validateIndianPhone(controller.text) == null;
+  }
+
+  Future<void> _syncContactsToDatabase(
+    List<String> phones,
+    List<String?> names,
+    int priorityIndex,
+  ) async {
+    // Clear stale contacts so UI and SOS flows stay in sync.
+    await _contactRepository.clearAllContacts();
+
+    for (int i = 0; i < phones.length; i++) {
+      final phone = phones[i];
+      if (phone.isEmpty) continue;
+
+      final displayName = (names[i]?.trim().isNotEmpty ?? false)
+          ? names[i]!.trim()
+          : 'Contact ${i + 1}';
+
+      final contact = Contact(
+        id: _uuid.v4(),
+        name: displayName,
+        phone: phone,
+        isPrimary: priorityIndex == i,
+        createdAt: DateTime.now(),
+      );
+
+      await _contactRepository.addContact(contact);
+    }
   }
 
   bool _isContact2Enabled() => _isContactValid(_phone1Controller);
@@ -236,7 +253,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     });
   }
 
-  void _saveSettings() {
+  Future<void> _saveSettings() async {
     if (!_formKey.currentState!.validate()) {
       return;
     }
@@ -271,7 +288,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       return;
     }
 
-    _saveToPreferences();
+    await _saveToPreferences();
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
         content: Text('Settings Saved'),
@@ -302,12 +319,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await prefs.setString('contact_1_phone', phone1);
     await prefs.setString('contact_2_phone', phone2);
     await prefs.setString('contact_3_phone', phone3);
-    await prefs.setString(
-      'emergency_message',
-      _emergencyMessageController.text,
-    );
     await prefs.setString('shake_sensitivity', _selectedSensitivity);
     await prefs.setInt('priority_contact_index', priorityIndex);
+
+    await _syncContactsToDatabase(
+      [phone1, phone2, phone3],
+      [_contact1Name, _contact2Name, _contact3Name],
+      priorityIndex,
+    );
 
     // Update original values after save
     setState(() {
@@ -315,7 +334,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _originalPhone1 = phone1;
       _originalPhone2 = phone2;
       _originalPhone3 = phone3;
-      _originalEmergencyMessage = _emergencyMessageController.text;
       _originalSensitivity = _selectedSensitivity;
       _originalPriorityIndex = priorityIndex;
       _hasUnsavedChanges = false;
@@ -325,7 +343,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _pickContactFromPhonebook(int contactIndex) async {
     try {
       final picker = FlutterNativeContactPicker();
-      final Contact? contact = await picker.selectContact();
+      final native_contact.Contact? contact = await picker.selectContact();
 
       if (contact != null &&
           contact.phoneNumbers != null &&
@@ -479,8 +497,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 _phone1Controller.clear();
                 _phone2Controller.clear();
                 _phone3Controller.clear();
-                _emergencyMessageController.text =
-                    AppConstants.defaultEmergencyMessage;
                 _selectedSensitivity = 'MEDIUM';
                 _priorityContactIndex = -1;
               });
@@ -536,18 +552,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
             },
           ),
           actions: [
-            IconButton(
-              icon: const Icon(Icons.people_alt),
-              tooltip: 'Manage Contacts',
-              onPressed: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (context) => const ContactListScreen(),
-                  ),
-                );
-              },
-            ),
             IconButton(
               icon: const Icon(Icons.history),
               tooltip: 'View SOS Event History',
@@ -640,28 +644,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                 ),
                 const SizedBox(height: 32),
-                _buildSectionTitle('Emergency Message'),
-                TextFormField(
-                  controller: _emergencyMessageController,
-                  decoration: InputDecoration(
-                    hintText: 'Enter emergency message',
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    helperText:
-                        '${_emergencyMessageController.text.length}/280 characters',
-                  ),
-                  maxLines: 2,
-                  maxLength: 280,
-                  validator: (value) {
-                    if (value == null || value.trim().isEmpty) {
-                      return 'Emergency message cannot be empty';
-                    }
-                    return null;
-                  },
-                  onChanged: (_) => setState(() {}),
-                ),
-                const SizedBox(height: 40),
+                const SizedBox(height: 8),
                 Row(
                   children: [
                     Expanded(

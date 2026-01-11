@@ -1,5 +1,9 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import 'package:open_filex/open_filex.dart';
+import 'package:flutter/services.dart';
 import 'package:beacon/core/models/sos_event.dart';
 import 'package:beacon/features/blackbox/presentation/notifiers/blackbox_notifier.dart';
 
@@ -181,6 +185,10 @@ class BlackBoxDetailScreen extends StatelessWidget {
                 separatorBuilder: (context, index) => const SizedBox(height: 8),
                 itemBuilder: (context, index) {
                   final contact = event.contactsNotified[index];
+                  final phone = index < event.contactsPhones.length
+                      ? event.contactsPhones[index]
+                      : null;
+                  final status = _contactDeliveryStatus(event, phone);
                   return Card(
                     child: Padding(
                       padding: const EdgeInsets.all(12),
@@ -190,12 +198,12 @@ class BlackBoxDetailScreen extends StatelessWidget {
                             width: 40,
                             height: 40,
                             decoration: BoxDecoration(
-                              color: Colors.green.withOpacity(0.1),
+                              color: status.color.withOpacity(0.12),
                               borderRadius: BorderRadius.circular(20),
                             ),
-                            child: const Icon(
-                              Icons.check_circle,
-                              color: Colors.green,
+                            child: Icon(
+                              status.icon,
+                              color: status.color,
                               size: 24,
                             ),
                           ),
@@ -204,11 +212,34 @@ class BlackBoxDetailScreen extends StatelessWidget {
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                Text(
-                                  'Contact ${index + 1}',
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.w600,
-                                  ),
+                                Row(
+                                  children: [
+                                    Text(
+                                      'Contact ${index + 1}',
+                                      style: const TextStyle(
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 6,
+                                        vertical: 2,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: status.color.withOpacity(0.12),
+                                        borderRadius: BorderRadius.circular(8),
+                                      ),
+                                      child: Text(
+                                        status.label,
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          color: status.color,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
                                 ),
                                 const SizedBox(height: 2),
                                 SelectableText(
@@ -219,6 +250,17 @@ class BlackBoxDetailScreen extends StatelessWidget {
                                     fontFamily: 'monospace',
                                   ),
                                 ),
+                                if (phone != null && phone.isNotEmpty) ...[
+                                  const SizedBox(height: 2),
+                                  SelectableText(
+                                    phone,
+                                    style: const TextStyle(
+                                      fontSize: 12,
+                                      color: Colors.grey,
+                                      fontFamily: 'monospace',
+                                    ),
+                                  ),
+                                ],
                               ],
                             ),
                           ),
@@ -231,11 +273,14 @@ class BlackBoxDetailScreen extends StatelessWidget {
             const SizedBox(height: 24),
 
             // Media Section
-            if (event.videoPath != null || event.audioPath != null) ...[
+            if (event.videoPath != null ||
+                event.audioPath != null ||
+                (event.evidencePath?.isNotEmpty ?? false)) ...[
               Text('Evidence', style: Theme.of(context).textTheme.titleMedium),
               const SizedBox(height: 12),
               if (event.videoPath != null)
                 _buildMediaItem(
+                  context,
                   'Video Recording',
                   event.videoPath!,
                   Icons.videocam,
@@ -243,10 +288,19 @@ class BlackBoxDetailScreen extends StatelessWidget {
                 ),
               if (event.audioPath != null)
                 _buildMediaItem(
+                  context,
                   'Audio Recording',
                   event.audioPath!,
                   Icons.mic,
                   Colors.purple,
+                ),
+              if (event.evidencePath != null && event.evidencePath!.isNotEmpty)
+                _buildMediaItem(
+                  context,
+                  'Evidence File',
+                  event.evidencePath!,
+                  Icons.attachment,
+                  Colors.orange,
                 ),
               const SizedBox(height: 24),
             ],
@@ -258,6 +312,7 @@ class BlackBoxDetailScreen extends StatelessWidget {
                 icon: const Icon(Icons.copy),
                 label: const Text('Copy Event ID'),
                 onPressed: () {
+                  Clipboard.setData(ClipboardData(text: event.id));
                   ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(
                       content: Text('Event ID copied to clipboard'),
@@ -317,7 +372,27 @@ class BlackBoxDetailScreen extends StatelessWidget {
     );
   }
 
+  Future<void> _openMedia(BuildContext context, String path) async {
+    if (path.isEmpty) return;
+
+    final file = File(path);
+    if (!file.existsSync()) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Evidence file not found on device')),
+      );
+      return;
+    }
+
+    final result = await OpenFilex.open(path);
+    if (result.type != ResultType.done) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Cannot open file: ${result.message}')),
+      );
+    }
+  }
+
   Widget _buildMediaItem(
+    BuildContext context,
     String label,
     String path,
     IconData icon,
@@ -334,11 +409,21 @@ class BlackBoxDetailScreen extends StatelessWidget {
           overflow: TextOverflow.ellipsis,
         ),
         trailing: const Icon(Icons.arrow_forward_ios, size: 16),
-        onTap: () {
-          // TODO: Open media file
-        },
+        onTap: () => _openMedia(context, path),
       ),
     );
+  }
+
+  _ContactStatus _contactDeliveryStatus(SOSEvent event, String? phone) {
+    if (phone != null && phone.isNotEmpty) {
+      if (event.sentPhones.contains(phone)) {
+        return _ContactStatus('Sent', Colors.green, Icons.check_circle);
+      }
+      if (event.failedPhones.contains(phone)) {
+        return _ContactStatus('Failed', Colors.red, Icons.cancel);
+      }
+    }
+    return _ContactStatus('Unknown', Colors.grey, Icons.help_outline);
   }
 
   Widget _buildStatusIcon(String status, double size) {
@@ -384,4 +469,11 @@ class BlackBoxDetailScreen extends StatelessWidget {
         return Colors.grey.withOpacity(0.15);
     }
   }
+}
+
+class _ContactStatus {
+  final String label;
+  final Color color;
+  final IconData icon;
+  _ContactStatus(this.label, this.color, this.icon);
 }
