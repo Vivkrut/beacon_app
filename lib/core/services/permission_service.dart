@@ -26,6 +26,12 @@ class PermissionService {
     return status.isGranted;
   }
 
+  /// Request phone/call permission
+  static Future<bool> requestPhonePermission() async {
+    final status = await Permission.phone.request();
+    return status.isGranted;
+  }
+
   /// Request contacts permission
   static Future<bool> requestContactsPermission() async {
     final status = await Permission.contacts.request();
@@ -56,13 +62,20 @@ class PermissionService {
     return status.isGranted;
   }
 
+  /// Check if phone permission is granted
+  static Future<bool> isPhonePermissionGranted() async {
+    final status = await Permission.phone.status;
+    return status.isGranted;
+  }
+
   /// Request all critical permissions
   static Future<bool> requestAllPermissions() async {
     final location = await requestLocationPermission();
     final sms = await requestSmsPermission();
     final camera = await requestCameraPermission();
     final microphone = await requestMicrophonePermission();
+    final phone = await requestPhonePermission();
 
-    return location && sms && camera && microphone;
+    return location && sms && camera && microphone && phone;
   }
 }

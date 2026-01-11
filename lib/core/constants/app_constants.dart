@@ -29,6 +29,19 @@ class AppConstants {
   // SMS
   static const int smsMaxRetries = 3;
   static const int smsRetryDelayMs = 2000;
+  // Populate via --dart-define at build time to avoid shipping secrets
+  static const String twilioAccountSid = String.fromEnvironment(
+    'TWILIO_ACCOUNT_SID',
+    defaultValue: '',
+  );
+  static const String twilioAuthToken = String.fromEnvironment(
+    'TWILIO_AUTH_TOKEN',
+    defaultValue: '',
+  );
+  static const String twilioFromNumber = String.fromEnvironment(
+    'TWILIO_FROM_NUMBER',
+    defaultValue: '',
+  );
 
   // Settings Defaults
   static const String defaultShakeSensitivity = 'MEDIUM';
